@@ -5,17 +5,26 @@
 
 let condominioSelecionado = null;
 let filtroAtual = { mes: null, ano: null };
+let usuarioLogado = null;
+
+const SESSION_KEY = 'balancete_usuario_logado';
 
 /**
  * Inicializa a interface
  */
 function inicializarUI() {
+    if (!usuarioLogado) {
+        return;
+    }
+    
     atualizarListaCondominios();
     atualizarDashboard();
     configurarEventListeners();
     
     // Seleciona o primeiro condomínio se existir
-    const condominios = obterCondominios();
+    const isAdmin = usuarioLogado.isAdmin || false;
+    const usuarioId = isAdmin ? null : usuarioLogado.id;
+    const condominios = obterCondominios(usuarioId, isAdmin);
     if (condominios.length > 0) {
         selecionarCondominio(condominios[0].id);
     }
@@ -54,22 +63,40 @@ function configurarEventListeners() {
     if (selectAno) {
         selectAno.addEventListener('change', aplicarFiltros);
     }
+    
+    // Botão de logout
+    const btnLogout = document.getElementById('btnLogout');
+    if (btnLogout) {
+        btnLogout.addEventListener('click', fazerLogout);
+    }
 }
 
 /**
- * Atualiza a lista de condomínios no select
+ * Atualiza a lista de condomínios no select (apenas do usuário logado ou todos se for admin)
  */
 function atualizarListaCondominios() {
     const select = document.getElementById('selectCondominio');
     if (!select) return;
     
-    const condominios = obterCondominios();
+    if (!usuarioLogado) {
+        select.innerHTML = '<option value="">Faça login para ver condomínios</option>';
+        return;
+    }
+    
+    const isAdmin = usuarioLogado.isAdmin || false;
+    const usuarioId = isAdmin ? null : usuarioLogado.id;
+    const condominios = obterCondominios(usuarioId, isAdmin);
+    
     select.innerHTML = '<option value="">Selecione um condomínio</option>';
     
     condominios.forEach(condominio => {
         const option = document.createElement('option');
         option.value = condominio.id;
-        option.textContent = condominio.nome;
+        // Se for admin, mostra também o dono do condomínio
+        const nomeExibicao = isAdmin 
+            ? `${condominio.nome} (ID: ${condominio.usuarioId})`
+            : condominio.nome;
+        option.textContent = nomeExibicao;
         select.appendChild(option);
     });
     
@@ -80,7 +107,10 @@ function atualizarListaCondominios() {
         condominios.forEach(condominio => {
             const option = document.createElement('option');
             option.value = condominio.id;
-            option.textContent = condominio.nome;
+            const nomeExibicao = isAdmin 
+                ? `${condominio.nome} (ID: ${condominio.usuarioId})`
+                : condominio.nome;
+            option.textContent = nomeExibicao;
             if (condominioSelecionado && condominio.id === condominioSelecionado) {
                 option.selected = true;
             }
@@ -308,6 +338,17 @@ function limparFiltros() {
 function handleNovoCondominio(event) {
     event.preventDefault();
     
+    if (!usuarioLogado) {
+        mostrarAlerta('Faça login para adicionar condomínios', 'danger');
+        return;
+    }
+    
+    // Admin não pode criar condomínios (apenas visualizar)
+    if (usuarioLogado.isAdmin) {
+        mostrarAlerta('Administrador não pode criar condomínios. Apenas visualização.', 'warning');
+        return;
+    }
+    
     const input = document.getElementById('nomeCondominio');
     const nome = input.value.trim();
     
@@ -317,7 +358,7 @@ function handleNovoCondominio(event) {
     }
     
     try {
-        const condominio = criarCondominio(nome);
+        const condominio = criarCondominio(nome, usuarioLogado.id);
         const condominioAdicionado = adicionarCondominio(condominio);
         
         atualizarListaCondominios();
@@ -446,4 +487,246 @@ function atualizarCategorias() {
         option.textContent = categoria;
         select.appendChild(option);
     });
+}
+
+/**
+ * Verifica se há um usuário logado na sessão
+ * @returns {Usuario|null} Usuário logado ou null
+ */
+function verificarSessao() {
+    try {
+        const usuarioIdStr = sessionStorage.getItem(SESSION_KEY);
+        if (!usuarioIdStr) {
+            return null;
+        }
+        
+        // Se for "admin", retorna usuário admin
+        if (usuarioIdStr === 'admin') {
+            return criarUsuarioAdmin();
+        }
+        
+        const usuarioId = parseInt(usuarioIdStr, 10);
+        const usuario = obterUsuarioPorId(usuarioId);
+        return usuario || null;
+    } catch (error) {
+        console.error('Erro ao verificar sessão:', error);
+        return null;
+    }
+}
+
+/**
+ * Realiza login do usuário
+ * @param {string} email - Email do usuário
+ * @param {string} senha - Senha do usuário
+ * @returns {Object} {sucesso: boolean, erro: string|null}
+ */
+function fazerLogin(email, senha) {
+    if (!email || !senha) {
+        return { sucesso: false, erro: 'Email e senha são obrigatórios' };
+    }
+    
+    const usuario = autenticarUsuario(email, senha);
+    if (!usuario) {
+        return { sucesso: false, erro: 'Email ou senha incorretos' };
+    }
+    
+    usuarioLogado = usuario;
+    // Se for admin, salva como "admin", senão salva o ID
+    const sessionValue = usuario.isAdmin ? 'admin' : usuario.id.toString();
+    sessionStorage.setItem(SESSION_KEY, sessionValue);
+    
+    return { sucesso: true, erro: null };
+}
+
+/**
+ * Realiza logout do usuário
+ */
+function fazerLogout() {
+    usuarioLogado = null;
+    condominioSelecionado = null;
+    sessionStorage.removeItem(SESSION_KEY);
+    mostrarTelaLogin();
+    limparDashboard();
+    atualizarTabelaMovimentacoes();
+}
+
+/**
+ * Mostra a tela de login (modal)
+ */
+function mostrarTelaLogin() {
+    const modalElement = document.getElementById('modalLogin');
+    if (!modalElement) {
+        console.error('Modal de login não encontrado!');
+        return;
+    }
+    
+    // Verifica se o Bootstrap está carregado
+    if (typeof bootstrap === 'undefined') {
+        console.error('Bootstrap não está carregado!');
+        return;
+    }
+    
+    try {
+        const modal = new bootstrap.Modal(modalElement, {
+            backdrop: 'static',
+            keyboard: false
+        });
+        modal.show();
+    } catch (error) {
+        console.error('Erro ao mostrar modal:', error);
+        // Fallback: mostra o modal diretamente
+        modalElement.style.display = 'block';
+        modalElement.classList.add('show');
+        document.body.classList.add('modal-open');
+    }
+}
+
+/**
+ * Esconde a tela de login e mostra o conteúdo principal
+ */
+function esconderTelaLogin() {
+    const modalElement = document.getElementById('modalLogin');
+    const modal = bootstrap.Modal.getInstance(modalElement);
+    if (modal) {
+        modal.hide();
+    }
+    
+    // Mostra o conteúdo principal
+    const conteudoPrincipal = document.getElementById('conteudoPrincipal');
+    if (conteudoPrincipal) {
+        conteudoPrincipal.style.display = 'block';
+    }
+    
+    atualizarInfoUsuario();
+}
+
+/**
+ * Atualiza as informações do usuário na interface
+ */
+function atualizarInfoUsuario() {
+    const usuarioEmail = document.getElementById('usuarioEmail');
+    if (usuarioEmail && usuarioLogado) {
+        const emailExibicao = usuarioLogado.isAdmin 
+            ? `${usuarioLogado.email} (ADMIN)`
+            : usuarioLogado.email;
+        usuarioEmail.textContent = emailExibicao;
+    }
+    
+    const infoUsuario = document.getElementById('infoUsuario');
+    if (infoUsuario) {
+        infoUsuario.style.display = usuarioLogado ? 'inline' : 'none';
+        // Destaca visualmente se for admin
+        if (usuarioLogado && usuarioLogado.isAdmin) {
+            infoUsuario.classList.add('text-warning');
+            infoUsuario.style.fontWeight = 'bold';
+        }
+    }
+    
+    const btnLogout = document.getElementById('btnLogout');
+    if (btnLogout) {
+        btnLogout.style.display = usuarioLogado ? 'inline-block' : 'none';
+    }
+    
+    // Mostra/oculta badge de admin e campo de novo condomínio
+    const adminBadge = document.getElementById('adminBadge');
+    const containerNovoCondominio = document.getElementById('containerNovoCondominio');
+    
+    if (usuarioLogado && usuarioLogado.isAdmin) {
+        if (adminBadge) adminBadge.style.display = 'inline';
+        if (containerNovoCondominio) containerNovoCondominio.style.display = 'none';
+    } else {
+        if (adminBadge) adminBadge.style.display = 'none';
+        if (containerNovoCondominio) containerNovoCondominio.style.display = 'block';
+    }
+}
+
+/**
+ * Handler para o formulário de login
+ * @param {Event} event - Evento do formulário
+ */
+function handleLogin(event) {
+    event.preventDefault();
+    console.log('handleLogin chamado');
+    
+    const email = document.getElementById('loginEmail').value.trim();
+    const senha = document.getElementById('loginSenha').value;
+    
+    console.log('Tentando fazer login com:', email);
+    
+    if (!email || !senha) {
+        mostrarAlerta('Por favor, preencha email e senha', 'danger');
+        return;
+    }
+    
+    const resultado = fazerLogin(email, senha);
+    console.log('Resultado do login:', resultado);
+    
+    if (resultado.sucesso) {
+        esconderTelaLogin();
+        inicializarUI();
+        atualizarCategorias();
+        atualizarInfoUsuario();
+        mostrarAlerta('Login realizado com sucesso!', 'success');
+        
+        // Limpa o formulário
+        document.getElementById('loginEmail').value = '';
+        document.getElementById('loginSenha').value = '';
+    } else {
+        mostrarAlerta(resultado.erro, 'danger');
+    }
+}
+
+/**
+ * Handler para o formulário de cadastro
+ * @param {Event} event - Evento do formulário
+ */
+function handleCadastro(event) {
+    event.preventDefault();
+    console.log('handleCadastro chamado');
+    
+    const email = document.getElementById('cadastroEmail').value.trim();
+    const senha = document.getElementById('cadastroSenha').value;
+    const confirmarSenha = document.getElementById('cadastroConfirmarSenha').value;
+    
+    console.log('Tentando cadastrar:', email);
+    
+    if (!email || !senha) {
+        mostrarAlerta('Por favor, preencha todos os campos', 'danger');
+        return;
+    }
+    
+    if (senha !== confirmarSenha) {
+        mostrarAlerta('As senhas não coincidem', 'danger');
+        return;
+    }
+    
+    try {
+        console.log('Criando usuário...');
+        const usuario = criarUsuario(email, senha);
+        console.log('Usuário criado, adicionando ao banco...');
+        adicionarUsuario(usuario);
+        console.log('Usuário adicionado com sucesso!');
+        
+        // Faz login automaticamente após cadastro
+        const resultado = fazerLogin(email, senha);
+        console.log('Resultado do login após cadastro:', resultado);
+        
+        if (resultado.sucesso) {
+            esconderTelaLogin();
+            inicializarUI();
+            atualizarCategorias();
+            atualizarInfoUsuario();
+            mostrarAlerta('Cadastro realizado com sucesso!', 'success');
+            
+            // Limpa o formulário
+            document.getElementById('cadastroEmail').value = '';
+            document.getElementById('cadastroSenha').value = '';
+            document.getElementById('cadastroConfirmarSenha').value = '';
+        } else {
+            mostrarAlerta('Cadastro realizado, mas erro ao fazer login: ' + resultado.erro, 'warning');
+        }
+    } catch (error) {
+        console.error('Erro no cadastro:', error);
+        mostrarAlerta(error.message, 'danger');
+    }
 }
